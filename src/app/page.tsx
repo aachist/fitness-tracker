@@ -26,10 +26,6 @@ import {
 } from '@/components/ui/dialog'
 import {
   Upload,
-  Activity,
-  Route,
-  TrendingUp,
-  BarChart3,
   FileText,
   Plus,
   Download,
@@ -37,8 +33,6 @@ import {
   Edit2,
   Check,
   X,
-  Thermometer,
-  Heart,
 } from 'lucide-react'
 
 interface TrackRow {
@@ -61,42 +55,57 @@ interface ParsedData {
   totalRuns: number
   avgHr: number | null
   avgTemp: number | null
+  dateFrom: string
+  dateTo: string
 }
 
-// Генератор уникальных ID
+const STORAGE_KEY = 'fitness-tracker-data'
+
 const generateId = () => Math.random().toString(36).substring(2, 15)
 
-// Парсинг даты из строки DD.MM.YYYY
 const parseDate = (dateStr: string): Date => {
   const [day, month, year] = dateStr.split('.').map(Number)
   return new Date(year, month - 1, day)
 }
 
-// Форматирование даты для отображения
-const formatDate = (date: Date): string => {
-  const day = date.getDate().toString().padStart(2, '0')
-  const month = (date.getMonth() + 1).toString().padStart(2, '0')
-  const year = date.getFullYear()
-  return `${day}.${month}.${year}`
+const formatDateShort = (dateStr: string): string => {
+  const [day, month, year] = dateStr.split('.')
+  return `${day}.${month}.${year?.slice(-2)}`
 }
 
-// Сортировка строк по дате
 const sortByDate = (rows: TrackRow[]): TrackRow[] => {
   return [...rows].sort((a, b) => parseDate(a.date).getTime() - parseDate(b.date).getTime())
 }
 
 export default function Home() {
-  const [data, setData] = useState<ParsedData | null>(null)
-  const [fileName, setFileName] = useState<string>('')
+  const [data, setData] = useState<ParsedData | null>(() => {
+    if (typeof window === 'undefined') return null
+    try {
+      const savedData = localStorage.getItem(STORAGE_KEY)
+      if (savedData) {
+        return JSON.parse(savedData)
+      }
+    } catch (error) {
+      console.error('Error loading from localStorage:', error)
+    }
+    return null
+  })
+  const [fileName, setFileName] = useState<string>(() => {
+    if (typeof window === 'undefined') return ''
+    try {
+      const savedData = localStorage.getItem(STORAGE_KEY)
+      return savedData ? 'сохранённые данные' : ''
+    } catch {
+      return ''
+    }
+  })
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
 
-  // Состояния для редактирования
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValues, setEditValues] = useState<Partial<TrackRow>>({})
 
-  // Состояния для добавления тренировки
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
   const [newWorkout, setNewWorkout] = useState({
     date: '',
@@ -107,7 +116,16 @@ export default function Home() {
     hr: '',
   })
 
-  // Пересчёт статистики
+  useEffect(() => {
+    if (data && data.rows.length > 0) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+      } catch (error) {
+        console.error('Error saving to localStorage:', error)
+      }
+    }
+  }, [data])
+
   const recalculateStats = useCallback((rows: TrackRow[]): ParsedData => {
     const totalDistance = rows.reduce((sum, r) => sum + r.km, 0)
     const totalTime = rows.reduce((sum, r) => sum + r.totalMinutes, 0)
@@ -116,18 +134,23 @@ export default function Home() {
     const hrValues = rows.filter(r => r.hr !== null).map(r => r.hr as number)
     const dropValues = rows.filter(r => r.drop !== null).map(r => r.drop as number)
 
+    const sortedRows = sortByDate(rows)
+    const dateFrom = sortedRows.length > 0 ? sortedRows[0].date : ''
+    const dateTo = sortedRows.length > 0 ? sortedRows[sortedRows.length - 1].date : ''
+
     return {
-      rows,
-      totalDistance: Math.round(totalDistance * 100) / 100,
+      rows: sortedRows,
+      totalDistance: Math.round(totalDistance),
       totalTime,
-      avgSpeed: Math.round(avgSpeed * 100) / 100,
+      avgSpeed: Math.round(avgSpeed),
       totalRuns: rows.length,
       avgHr: hrValues.length > 0 ? Math.round(hrValues.reduce((a, b) => a + b, 0) / hrValues.length) : null,
-      avgTemp: dropValues.length > 0 ? Math.round(dropValues.reduce((a, b) => a + b, 0) / dropValues.length * 10) / 10 : null,
+      avgTemp: dropValues.length > 0 ? Math.round(dropValues.reduce((a, b) => a + b, 0) / dropValues.length) : null,
+      dateFrom,
+      dateTo,
     }
   }, [])
 
-  // Парсинг XML
   const parseXML = useCallback((xmlContent: string): TrackRow[] => {
     const parser = new DOMParser()
     const xmlDoc = parser.parseFromString(xmlContent, 'text/xml')
@@ -149,20 +172,19 @@ export default function Home() {
       trackRows.push({
         id: generateId(),
         date,
-        km,
+        km: Math.round(km),
         h,
         m,
-        drop: dropAttr !== null ? parseFloat(dropAttr) : null,
-        hr: hrAttr !== null ? parseInt(hrAttr) : null,
+        drop: dropAttr !== null && dropAttr !== '' ? Math.round(parseFloat(dropAttr)) : null,
+        hr: hrAttr !== null && hrAttr !== '' ? parseInt(hrAttr) : null,
         totalMinutes,
-        speedKmh: Math.round(speedKmh * 100) / 100,
+        speedKmh: Math.round(speedKmh),
       })
     })
 
     return sortByDate(trackRows)
   }, [])
 
-  // Первичная загрузка файла
   const handleFile = useCallback(
     (file: File) => {
       setFileName(file.name)
@@ -177,7 +199,6 @@ export default function Home() {
     [parseXML, recalculateStats]
   )
 
-  // Импорт дополнительного файла
   const handleImportFile = useCallback(
     (file: File) => {
       const reader = new FileReader()
@@ -240,7 +261,6 @@ export default function Home() {
     [handleImportFile]
   )
 
-  // Редактирование строки
   const startEditing = (row: TrackRow) => {
     setEditingId(row.id)
     setEditValues({ ...row })
@@ -266,11 +286,12 @@ export default function Home() {
           return {
             ...row,
             ...editValues,
-            km,
+            km: Math.round(km),
             h,
             m,
             totalMinutes,
-            speedKmh: Math.round(speedKmh * 100) / 100,
+            speedKmh: Math.round(speedKmh),
+            drop: editValues.drop !== null ? Math.round(editValues.drop) : null,
           } as TrackRow
         }
         return row
@@ -281,7 +302,6 @@ export default function Home() {
     setEditValues({})
   }
 
-  // Удаление строки
   const deleteRow = (id: string) => {
     setData(prev => {
       if (!prev) return prev
@@ -290,25 +310,23 @@ export default function Home() {
     })
   }
 
-  // Добавление новой тренировки
   const addWorkout = () => {
-    const [day, month, year] = newWorkout.date.split('.').map(Number)
     const date = newWorkout.date
 
     const newRow: TrackRow = {
       id: generateId(),
       date,
-      km: parseFloat(newWorkout.km) || 0,
+      km: Math.round(parseFloat(newWorkout.km) || 0),
       h: parseInt(newWorkout.h) || 0,
       m: parseInt(newWorkout.m) || 0,
-      drop: newWorkout.drop !== '' ? parseFloat(newWorkout.drop) : null,
+      drop: newWorkout.drop !== '' ? Math.round(parseFloat(newWorkout.drop)) : null,
       hr: newWorkout.hr !== '' ? parseInt(newWorkout.hr) : null,
       totalMinutes: (parseInt(newWorkout.h) || 0) * 60 + (parseInt(newWorkout.m) || 0),
       speedKmh: 0,
     }
 
     newRow.speedKmh = newRow.totalMinutes > 0
-      ? Math.round((newRow.km / (newRow.totalMinutes / 60)) * 100) / 100
+      ? Math.round(newRow.km / (newRow.totalMinutes / 60))
       : 0
 
     setData(prev => {
@@ -321,7 +339,6 @@ export default function Home() {
     setIsAddDialogOpen(false)
   }
 
-  // Экспорт в XML
   const exportToXML = () => {
     if (!data) return
 
@@ -346,13 +363,12 @@ export default function Home() {
     URL.revokeObjectURL(url)
   }
 
-  const formatTime = (minutes: number): string => {
-    const h = Math.floor(minutes / 60)
-    const m = minutes % 60
-    return `${h}ч ${m}мин`
+  const clearData = () => {
+    setData(null)
+    setFileName('')
+    localStorage.removeItem(STORAGE_KEY)
   }
 
-  // Подготовка данных для графика
   const chartData = data?.rows.map((row) => ({
     date: row.date,
     shortDate: parseDate(row.date).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' }),
@@ -365,15 +381,12 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-4 md:p-8">
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="text-center mb-8">
+        <div className="text-center mb-6">
           <h1 className="text-3xl md:text-4xl font-bold bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent mb-2">
             Анализатор тренировок
           </h1>
-          <p className="text-slate-400 text-lg">Загрузите XML файл с данными тренировок для визуализации прогресса</p>
         </div>
 
-        {/* File Upload Area */}
         {!data && (
           <div
             className={`border-2 border-dashed rounded-2xl p-12 text-center transition-all duration-300 cursor-pointer ${
@@ -400,7 +413,18 @@ export default function Home() {
           </div>
         )}
 
-        {/* Toolbar */}
+        {data && data.rows.length > 0 && (
+          <div className="mb-6 text-center">
+            <p className="text-lg md:text-xl text-slate-200">
+              Пройдено с <span className="text-cyan-400 font-semibold">{formatDateShort(data.dateFrom)}</span> по{' '}
+              <span className="text-cyan-400 font-semibold">{formatDateShort(data.dateTo)}</span> —{' '}
+              <span className="text-emerald-400 font-bold text-2xl">{data.totalDistance} км</span> за{' '}
+              <span className="text-amber-400 font-semibold">{data.totalRuns}</span> тренировок со средней скоростью{' '}
+              <span className="text-purple-400 font-bold text-xl">{data.avgSpeed} км/ч</span>
+            </p>
+          </div>
+        )}
+
         {data && (
           <div className="mb-6 flex flex-wrap items-center justify-between gap-4 bg-slate-800/50 rounded-xl p-4">
             <div className="flex items-center gap-3">
@@ -409,7 +433,6 @@ export default function Home() {
               <span className="text-slate-500">({data.totalRuns} записей)</span>
             </div>
             <div className="flex flex-wrap gap-2">
-              {/* Импорт */}
               <input
                 ref={importInputRef}
                 type="file"
@@ -426,7 +449,6 @@ export default function Home() {
                 Импорт XML
               </Button>
 
-              {/* Добавить тренировку */}
               <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
                 <DialogTrigger asChild>
                   <Button variant="outline" className="border-slate-600 hover:bg-slate-700">
@@ -457,8 +479,8 @@ export default function Home() {
                       <Input
                         id="km"
                         type="number"
-                        step="0.01"
-                        placeholder="10.5"
+                        step="1"
+                        placeholder="10"
                         value={newWorkout.km}
                         onChange={(e) => setNewWorkout({ ...newWorkout, km: e.target.value })}
                         className="bg-slate-700 border-slate-600"
@@ -491,7 +513,7 @@ export default function Home() {
                       <Input
                         id="drop"
                         type="number"
-                        step="0.1"
+                        step="1"
                         placeholder="-5"
                         value={newWorkout.drop}
                         onChange={(e) => setNewWorkout({ ...newWorkout, drop: e.target.value })}
@@ -521,7 +543,6 @@ export default function Home() {
                 </DialogContent>
               </Dialog>
 
-              {/* Экспорт */}
               <Button
                 variant="outline"
                 onClick={exportToXML}
@@ -531,87 +552,18 @@ export default function Home() {
                 Экспорт XML
               </Button>
 
-              {/* Сброс */}
               <Button
                 variant="outline"
-                onClick={() => {
-                  setData(null)
-                  setFileName('')
-                }}
+                onClick={clearData}
                 className="border-slate-600 hover:bg-slate-700"
               >
-                Новый файл
+                Очистить
               </Button>
             </div>
           </div>
         )}
 
-        {/* Stats Cards */}
-        {data && (
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-8">
-            <Card className="bg-slate-800/50 border-slate-700 backdrop-blur">
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium text-slate-400">Расстояние</CardTitle>
-                <Route className="h-4 w-4 text-cyan-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold text-white">{data.totalDistance} <span className="text-sm text-slate-400">км</span></div>
-              </CardContent>
-            </Card>
-            <Card className="bg-slate-800/50 border-slate-700 backdrop-blur">
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium text-slate-400">Время</CardTitle>
-                <Activity className="h-4 w-4 text-emerald-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold text-white">{formatTime(data.totalTime)}</div>
-              </CardContent>
-            </Card>
-            <Card className="bg-slate-800/50 border-slate-700 backdrop-blur">
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium text-slate-400">Ср. скорость</CardTitle>
-                <TrendingUp className="h-4 w-4 text-amber-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold text-white">{data.avgSpeed} <span className="text-sm text-slate-400">км/ч</span></div>
-              </CardContent>
-            </Card>
-            <Card className="bg-slate-800/50 border-slate-700 backdrop-blur">
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium text-slate-400">Тренировок</CardTitle>
-                <BarChart3 className="h-4 w-4 text-purple-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold text-white">{data.totalRuns}</div>
-              </CardContent>
-            </Card>
-            {data.avgTemp !== null && (
-              <Card className="bg-slate-800/50 border-slate-700 backdrop-blur">
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium text-slate-400">Ср. температура</CardTitle>
-                  <Thermometer className="h-4 w-4 text-blue-400" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold text-white">{data.avgTemp} <span className="text-sm text-slate-400">°C</span></div>
-                </CardContent>
-              </Card>
-            )}
-            {data.avgHr !== null && (
-              <Card className="bg-slate-800/50 border-slate-700 backdrop-blur">
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium text-slate-400">Ср. пульс</CardTitle>
-                  <Heart className="h-4 w-4 text-red-400" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold text-white">{data.avgHr} <span className="text-sm text-slate-400">уд/мин</span></div>
-                </CardContent>
-              </Card>
-            )}
-          </div>
-        )}
-
-        {/* Chart */}
-        {data && (
+        {data && data.rows.length > 0 && (
           <Card className="bg-slate-800/50 border-slate-700 backdrop-blur mb-6">
             <CardHeader>
               <CardTitle className="text-white">Показатели тренировок</CardTitle>
@@ -635,7 +587,6 @@ export default function Home() {
                       textAnchor="end"
                       height={60}
                     />
-                    {/* Ось Y для расстояния и скорости */}
                     <YAxis
                       yAxisId="left"
                       stroke="#94a3b8"
@@ -647,7 +598,6 @@ export default function Home() {
                         fill: '#94a3b8',
                       }}
                     />
-                    {/* Ось Y для температуры */}
                     <YAxis
                       yAxisId="temp"
                       orientation="right"
@@ -660,7 +610,6 @@ export default function Home() {
                         fill: '#60a5fa',
                       }}
                     />
-                    {/* Ось Y для пульса */}
                     <YAxis
                       yAxisId="hr"
                       orientation="right"
@@ -700,7 +649,6 @@ export default function Home() {
                         return value
                       }}
                     />
-                    {/* Дистанция */}
                     <Line
                       yAxisId="left"
                       type="monotone"
@@ -711,7 +659,6 @@ export default function Home() {
                       activeDot={{ r: 5, fill: '#22d3ee' }}
                       name="km"
                     />
-                    {/* Скорость */}
                     <Line
                       yAxisId="left"
                       type="monotone"
@@ -722,7 +669,6 @@ export default function Home() {
                       activeDot={{ r: 5, fill: '#f59e0b' }}
                       name="speedKmh"
                     />
-                    {/* Температура */}
                     <Line
                       yAxisId="temp"
                       type="monotone"
@@ -734,7 +680,6 @@ export default function Home() {
                       name="drop"
                       connectNulls
                     />
-                    {/* Пульс */}
                     <Line
                       yAxisId="hr"
                       type="monotone"
@@ -753,13 +698,12 @@ export default function Home() {
           </Card>
         )}
 
-        {/* Data Table */}
-        {data && (
+        {data && data.rows.length > 0 && (
           <Card className="bg-slate-800/50 border-slate-700 backdrop-blur">
             <CardHeader>
               <CardTitle className="text-white">Детализация тренировок</CardTitle>
               <CardDescription className="text-slate-400">
-                Двойной клик на ячейке для редактирования. Размерность указана в заголовках столбцов.
+                Редактирование и удаление записей. Размерность указана в заголовках столбцов.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -788,7 +732,6 @@ export default function Home() {
                       >
                         <td className="py-2 px-2 text-slate-500">{idx + 1}</td>
 
-                        {/* Дата */}
                         <td className="py-2 px-2">
                           {editingId === row.id ? (
                             <Input
@@ -802,14 +745,13 @@ export default function Home() {
                           )}
                         </td>
 
-                        {/* Дистанция */}
                         <td className="py-2 px-2 text-right">
                           {editingId === row.id ? (
                             <Input
                               type="number"
-                              step="0.01"
+                              step="1"
                               value={editValues.km || ''}
-                              onChange={(e) => setEditValues({ ...editValues, km: parseFloat(e.target.value) || 0 })}
+                              onChange={(e) => setEditValues({ ...editValues, km: parseInt(e.target.value) || 0 })}
                               className="w-20 bg-slate-700 border-slate-600 h-8 text-sm text-right ml-auto"
                             />
                           ) : (
@@ -817,7 +759,6 @@ export default function Home() {
                           )}
                         </td>
 
-                        {/* Часы */}
                         <td className="py-2 px-2 text-right">
                           {editingId === row.id ? (
                             <Input
@@ -831,7 +772,6 @@ export default function Home() {
                           )}
                         </td>
 
-                        {/* Минуты */}
                         <td className="py-2 px-2 text-right">
                           {editingId === row.id ? (
                             <Input
@@ -845,19 +785,17 @@ export default function Home() {
                           )}
                         </td>
 
-                        {/* Скорость */}
                         <td className="py-2 px-2 text-right">
                           <span className="text-amber-400">{row.speedKmh}</span>
                         </td>
 
-                        {/* Температура */}
                         <td className="py-2 px-2 text-right">
                           {editingId === row.id ? (
                             <Input
                               type="number"
-                              step="0.1"
+                              step="1"
                               value={editValues.drop ?? ''}
-                              onChange={(e) => setEditValues({ ...editValues, drop: e.target.value ? parseFloat(e.target.value) : null })}
+                              onChange={(e) => setEditValues({ ...editValues, drop: e.target.value ? parseInt(e.target.value) : null })}
                               placeholder="—"
                               className="w-16 bg-slate-700 border-slate-600 h-8 text-sm text-right ml-auto"
                             />
@@ -866,7 +804,6 @@ export default function Home() {
                           )}
                         </td>
 
-                        {/* Пульс */}
                         <td className="py-2 px-2 text-right">
                           {editingId === row.id ? (
                             <Input
@@ -881,7 +818,6 @@ export default function Home() {
                           )}
                         </td>
 
-                        {/* Действия */}
                         <td className="py-2 px-2">
                           <div className="flex items-center justify-center gap-1">
                             {editingId === row.id ? (
@@ -934,7 +870,6 @@ export default function Home() {
           </Card>
         )}
 
-        {/* Footer */}
         <div className="mt-12 text-center text-slate-500 text-sm">
           <p>Анализатор тренировок • XML визуализация данных</p>
         </div>
