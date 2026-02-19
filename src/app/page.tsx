@@ -33,7 +33,29 @@ import {
   Edit2,
   Check,
   X,
+  Map as MapIcon,
 } from 'lucide-react'
+
+// Динамический импорт Leaflet (только на клиенте)
+import dynamic from 'next/dynamic'
+
+// Типы для GPX данных
+interface GpxPoint {
+  lat: number
+  lon: number
+  ele: number | null
+  time: string | null
+  speed: number | null // км/ч
+  distance: number // метры от начала
+}
+
+interface GpxData {
+  date: string
+  points: GpxPoint[]
+  totalDistance: number
+  totalTime: number
+  avgSpeed: number
+}
 
 interface TrackRow {
   id: string
@@ -45,6 +67,7 @@ interface TrackRow {
   hr: number | null
   totalMinutes: number
   speedKmh: number
+  gpxData: GpxData | null
 }
 
 interface ParsedData {
@@ -59,7 +82,8 @@ interface ParsedData {
   dateTo: string
 }
 
-const STORAGE_KEY = 'fitness-tracker-data'
+const STORAGE_KEY = 'fitness-tracker-data-v2'
+const GPX_STORAGE_KEY = 'fitness-tracker-gpx-v2'
 
 const generateId = () => Math.random().toString(36).substring(2, 15)
 
@@ -75,6 +99,184 @@ const formatDateShort = (dateStr: string): string => {
 
 const sortByDate = (rows: TrackRow[]): TrackRow[] => {
   return [...rows].sort((a, b) => parseDate(a.date).getTime() - parseDate(b.date).getTime())
+}
+
+// Расстояние между двумя точками (формула Гаверсинуса)
+const haversineDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+  const R = 6371000 // радиус Земли в метрах
+  const dLat = (lat2 - lat1) * Math.PI / 180
+  const dLon = (lon2 - lon1) * Math.PI / 180
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2)
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  return R * c
+}
+
+// Парсинг GPX
+const parseGPX = (gpxContent: string, date: string): GpxData | null => {
+  try {
+    const parser = new DOMParser()
+    const xmlDoc = parser.parseFromString(gpxContent, 'text/xml')
+    
+    const trkpts = xmlDoc.querySelectorAll('trkpt')
+    if (trkpts.length === 0) return null
+
+    const points: GpxPoint[] = []
+    let totalDistance = 0
+    let prevPoint: { lat: number; lon: number; time: Date | null } | null = null
+
+    trkpts.forEach((pt, index) => {
+      const lat = parseFloat(pt.getAttribute('lat') || '0')
+      const lon = parseFloat(pt.getAttribute('lon') || '0')
+      const eleElement = pt.querySelector('ele')
+      const timeElement = pt.querySelector('time')
+      
+      const ele = eleElement ? parseFloat(eleElement.textContent || '0') : null
+      const timeStr = timeElement ? timeElement.textContent : null
+      const time = timeStr ? new Date(timeStr) : null
+
+      let distance = 0
+      let speed: number | null = null
+
+      if (prevPoint && prevPoint.time && time) {
+        distance = haversineDistance(prevPoint.lat, prevPoint.lon, lat, lon)
+        const timeDiff = (time.getTime() - prevPoint.time.getTime()) / 1000 / 3600 // часы
+        if (timeDiff > 0) {
+          speed = (distance / 1000) / timeDiff // км/ч
+        }
+      }
+
+      totalDistance += distance
+
+      points.push({
+        lat,
+        lon,
+        ele,
+        time: timeStr,
+        speed: speed ? Math.round(speed * 10) / 10 : null,
+        distance: Math.round(totalDistance),
+      })
+
+      prevPoint = { lat, lon, time }
+    })
+
+    // Вычисляем общее время и среднюю скорость
+    const firstTime = points[0]?.time ? new Date(points[0].time) : null
+    const lastTime = points[points.length - 1]?.time ? new Date(points[points.length - 1].time) : null
+    const totalTime = firstTime && lastTime ? (lastTime.getTime() - firstTime.getTime()) / 1000 / 60 : 0
+    const avgSpeed = totalTime > 0 ? (totalDistance / 1000) / (totalTime / 60) : 0
+
+    return {
+      date,
+      points,
+      totalDistance: Math.round(totalDistance),
+      totalTime: Math.round(totalTime),
+      avgSpeed: Math.round(avgSpeed * 10) / 10,
+    }
+  } catch (error) {
+    console.error('Error parsing GPX:', error)
+    return null
+  }
+}
+
+// Компонент карты (динамический)
+const MapContainer = dynamic(() => import('react-leaflet').then(mod => mod.MapContainer), { ssr: false })
+const TileLayer = dynamic(() => import('react-leaflet').then(mod => mod.TileLayer), { ssr: false })
+const Polyline = dynamic(() => import('react-leaflet').then(mod => mod.Polyline), { ssr: false })
+const Marker = dynamic(() => import('react-leaflet').then(mod => mod.Marker), { ssr: false })
+const Popup = dynamic(() => import('react-leaflet').then(mod => mod.Popup), { ssr: false })
+const useMap = dynamic(() => import('react-leaflet').then(mod => mod.useMap), { ssr: false })
+
+// Компонент для изменения вида карты
+function MapController({ center, zoom }: { center: [number, number]; zoom: number }) {
+  const mapRef = useRef<any>(null)
+  
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      import('react-leaflet').then(({ useMap }) => {
+        const map = mapRef.current
+        if (map) {
+          map.setView(center, zoom)
+        }
+      })
+    }
+  }, [center, zoom])
+  
+  return null
+}
+
+// Компонент карты
+function TrackMap({ gpxData }: { gpxData: GpxData | null }) {
+  const [mounted, setMounted] = useState(false)
+  const [L, setL] = useState<any>(null)
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      import('leaflet').then((leaflet) => {
+        setL(leaflet.default)
+        setMounted(true)
+      })
+    }
+  }, [])
+
+  if (!mounted || !gpxData || gpxData.points.length === 0) {
+    return (
+      <div className="h-[400px] bg-slate-700/50 rounded-lg flex items-center justify-center">
+        <p className="text-slate-400">
+          {mounted ? 'Загрузите GPX файл, нажав на дату в таблице' : 'Загрузка карты...'}
+        </p>
+      </div>
+    )
+  }
+
+  const points = gpxData.points
+  const center: [number, number] = [points[0].lat, points[0].lon]
+  const path: [number, number][] = points.map(p => [p.lat, p.lon])
+
+  return (
+    <div className="h-[400px] rounded-lg overflow-hidden border border-slate-600">
+      <MapContainer
+        center={center}
+        zoom={13}
+        style={{ height: '100%', width: '100%' }}
+        scrollWheelZoom={true}
+      >
+        {/* Спутниковый слой ESRI (бесплатный) */}
+        <TileLayer
+          attribution='&copy; <a href="https://www.esri.com/">Esri</a>'
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        />
+        {/* Дополнительный слой с названиями */}
+        <TileLayer
+          attribution=''
+          url="https://stamen-tiles.a.ssl.fastly.net/toner-labels/{z}/{x}/{y}.png"
+        />
+        <Polyline 
+          positions={path} 
+          pathOptions={{ color: '#22d3ee', weight: 3, opacity: 0.8 }}
+        />
+        {L && (
+          <>
+            <Marker position={path[0]} icon={L.divIcon({
+              className: 'custom-marker',
+              html: '<div style="background: #22c55e; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white;"></div>',
+              iconSize: [12, 12],
+            })}>
+              <Popup>Старт</Popup>
+            </Marker>
+            <Marker position={path[path.length - 1]} icon={L.divIcon({
+              className: 'custom-marker',
+              html: '<div style="background: #ef4444; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white;"></div>',
+              iconSize: [12, 12],
+            })}>
+              <Popup>Финиш</Popup>
+            </Marker>
+          </>
+        )}
+      </MapContainer>
+    </div>
+  )
 }
 
 export default function Home() {
@@ -102,6 +304,7 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
+  const gpxInputRef = useRef<HTMLInputElement>(null)
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValues, setEditValues] = useState<Partial<TrackRow>>({})
@@ -115,6 +318,12 @@ export default function Home() {
     drop: '',
     hr: '',
   })
+
+  // Состояние для GPX
+  const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [selectedGpxData, setSelectedGpxData] = useState<GpxData | null>(null)
+  const [gpxDateToLoad, setGpxDateToLoad] = useState<string | null>(null)
+  const [showGpxDialog, setShowGpxDialog] = useState(false)
 
   useEffect(() => {
     if (data && data.rows.length > 0) {
@@ -179,6 +388,7 @@ export default function Home() {
         hr: hrAttr !== null && hrAttr !== '' ? parseInt(hrAttr) : null,
         totalMinutes,
         speedKmh: Math.round(speedKmh),
+        gpxData: null,
       })
     })
 
@@ -323,6 +533,7 @@ export default function Home() {
       hr: newWorkout.hr !== '' ? parseInt(newWorkout.hr) : null,
       totalMinutes: (parseInt(newWorkout.h) || 0) * 60 + (parseInt(newWorkout.m) || 0),
       speedKmh: 0,
+      gpxData: null,
     }
 
     newRow.speedKmh = newRow.totalMinutes > 0
@@ -366,7 +577,80 @@ export default function Home() {
   const clearData = () => {
     setData(null)
     setFileName('')
+    setSelectedGpxData(null)
+    setSelectedDate(null)
     localStorage.removeItem(STORAGE_KEY)
+  }
+
+  // Обработка клика по дате
+  const handleDateClick = (date: string) => {
+    const existingRow = data?.rows.find(r => r.date === date)
+    
+    if (existingRow?.gpxData) {
+      // GPX уже есть для этой даты
+      setGpxDateToLoad(date)
+      setShowGpxDialog(true)
+    } else {
+      // Запрос нового GPX
+      setSelectedDate(date)
+      setSelectedGpxData(null)
+      setTimeout(() => {
+        gpxInputRef.current?.click()
+      }, 100)
+    }
+  }
+
+  // Обработка GPX файла
+  const handleGpxLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !selectedDate) return
+
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const content = ev.target?.result as string
+      const gpxData = parseGPX(content, selectedDate)
+      
+      if (gpxData) {
+        setSelectedGpxData(gpxData)
+        
+        // Сохраняем GPX данные в строку
+        setData(prev => {
+          if (!prev) return prev
+          const updatedRows = prev.rows.map(row => {
+            if (row.date === selectedDate) {
+              return { ...row, gpxData }
+            }
+            return row
+          })
+          return recalculateStats(updatedRows)
+        })
+      }
+    }
+    reader.readAsText(file)
+    
+    if (gpxInputRef.current) {
+      gpxInputRef.current.value = ''
+    }
+  }
+
+  // Обновление GPX
+  const handleUpdateGpx = () => {
+    setShowGpxDialog(false)
+    setSelectedDate(gpxDateToLoad)
+    setSelectedGpxData(null)
+    setTimeout(() => {
+      gpxInputRef.current?.click()
+    }, 100)
+  }
+
+  // Использовать существующий GPX
+  const handleUseExistingGpx = () => {
+    const existingRow = data?.rows.find(r => r.date === gpxDateToLoad)
+    if (existingRow?.gpxData) {
+      setSelectedDate(gpxDateToLoad)
+      setSelectedGpxData(existingRow.gpxData)
+    }
+    setShowGpxDialog(false)
   }
 
   const chartData = data?.rows.map((row) => ({
@@ -378,6 +662,15 @@ export default function Home() {
     hr: row.hr,
   })) || []
 
+  // Данные для графика GPX
+  const gpxChartData = selectedGpxData?.points
+    .filter(p => p.speed !== null || p.ele !== null)
+    .map((p, idx) => ({
+      distance: Math.round(p.distance / 100) / 10, // км
+      speed: p.speed,
+      ele: p.ele,
+    })) || []
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-4 md:p-8">
       <div className="max-w-7xl mx-auto">
@@ -386,6 +679,35 @@ export default function Home() {
             Анализатор тренировок
           </h1>
         </div>
+
+        {/* Скрытый input для GPX */}
+        <input
+          ref={gpxInputRef}
+          type="file"
+          accept=".gpx"
+          onChange={handleGpxLoad}
+          className="hidden"
+        />
+
+        {/* Диалог обновления GPX */}
+        <Dialog open={showGpxDialog} onOpenChange={setShowGpxDialog}>
+          <DialogContent className="bg-slate-800 border-slate-700 text-white">
+            <DialogHeader>
+              <DialogTitle>GPX файл уже загружен</DialogTitle>
+              <DialogDescription className="text-slate-400">
+                Для даты {gpxDateToLoad} уже есть GPX данные. Обновить?
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={handleUseExistingGpx} className="border-slate-600">
+                Использовать старые
+              </Button>
+              <Button onClick={handleUpdateGpx} className="bg-cyan-600 hover:bg-cyan-700">
+                Обновить
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {!data && (
           <div
@@ -699,11 +1021,11 @@ export default function Home() {
         )}
 
         {data && data.rows.length > 0 && (
-          <Card className="bg-slate-800/50 border-slate-700 backdrop-blur">
+          <Card className="bg-slate-800/50 border-slate-700 backdrop-blur mb-6">
             <CardHeader>
               <CardTitle className="text-white">Детализация тренировок</CardTitle>
               <CardDescription className="text-slate-400">
-                Редактирование и удаление записей. Размерность указана в заголовках столбцов.
+                Нажмите на дату для загрузки GPX трека. Размерность указана в заголовках столбцов.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -719,6 +1041,7 @@ export default function Home() {
                       <th className="text-right py-3 px-2 text-slate-400 font-medium">Скор. (км/ч)</th>
                       <th className="text-right py-3 px-2 text-slate-400 font-medium">Темп. (°C)</th>
                       <th className="text-right py-3 px-2 text-slate-400 font-medium">Пульс (уд/м)</th>
+                      <th className="text-center py-3 px-2 text-slate-400 font-medium">GPX</th>
                       <th className="text-center py-3 px-2 text-slate-400 font-medium">Действия</th>
                     </tr>
                   </thead>
@@ -741,7 +1064,12 @@ export default function Home() {
                               className="w-28 bg-slate-700 border-slate-600 h-8 text-sm"
                             />
                           ) : (
-                            <span className="text-white">{row.date}</span>
+                            <button
+                              onClick={() => handleDateClick(row.date)}
+                              className="text-cyan-400 hover:text-cyan-300 underline cursor-pointer"
+                            >
+                              {row.date}
+                            </button>
                           )}
                         </td>
 
@@ -818,6 +1146,14 @@ export default function Home() {
                           )}
                         </td>
 
+                        <td className="py-2 px-2 text-center">
+                          {row.gpxData ? (
+                            <span className="text-emerald-400 text-xs">✓</span>
+                          ) : (
+                            <span className="text-slate-600">—</span>
+                          )}
+                        </td>
+
                         <td className="py-2 px-2">
                           <div className="flex items-center justify-center gap-1">
                             {editingId === row.id ? (
@@ -870,8 +1206,119 @@ export default function Home() {
           </Card>
         )}
 
+        {/* Карта и график GPX */}
+        {data && data.rows.length > 0 && (
+          <Card className="bg-slate-800/50 border-slate-700 backdrop-blur mb-6">
+            <CardHeader>
+              <CardTitle className="text-white flex items-center gap-2">
+                <MapIcon className="w-5 h-5" />
+                Трек тренировки
+              </CardTitle>
+              <CardDescription className="text-slate-400">
+                {selectedDate 
+                  ? `Дата: ${selectedDate}${selectedGpxData ? ` | Расстояние: ${(selectedGpxData.totalDistance / 1000).toFixed(1)} км` : ''}`
+                  : 'Нажмите на дату в таблице для загрузки GPX файла'
+                }
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <TrackMap gpxData={selectedGpxData} />
+
+              {selectedGpxData && gpxChartData.length > 0 && (
+                <div className="h-[300px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart
+                      data={gpxChartData}
+                      margin={{ top: 5, right: 60, left: 20, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                      <XAxis
+                        dataKey="distance"
+                        stroke="#94a3b8"
+                        tick={{ fill: '#94a3b8', fontSize: 11 }}
+                        label={{
+                          value: 'Расстояние (км)',
+                          position: 'insideBottom',
+                          offset: -5,
+                          fill: '#94a3b8',
+                        }}
+                      />
+                      <YAxis
+                        yAxisId="speed"
+                        stroke="#f59e0b"
+                        tick={{ fill: '#f59e0b' }}
+                        label={{
+                          value: 'км/ч',
+                          angle: -90,
+                          position: 'insideLeft',
+                          fill: '#f59e0b',
+                        }}
+                      />
+                      <YAxis
+                        yAxisId="ele"
+                        orientation="right"
+                        stroke="#60a5fa"
+                        tick={{ fill: '#60a5fa' }}
+                        label={{
+                          value: 'м',
+                          angle: 90,
+                          position: 'insideRight',
+                          fill: '#60a5fa',
+                        }}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: '#1e293b',
+                          border: '1px solid #334155',
+                          borderRadius: '8px',
+                        }}
+                        labelStyle={{ color: '#f1f5f9' }}
+                        formatter={(value: number | null, name: string) => {
+                          if (value === null) return ['—', name]
+                          if (name === 'speed') return [`${value} км/ч`, 'Скорость']
+                          if (name === 'ele') return [`${value} м`, 'Высота']
+                          return [value, name]
+                        }}
+                        labelFormatter={(label) => `${label} км`}
+                      />
+                      <Legend
+                        wrapperStyle={{ paddingTop: '20px' }}
+                        formatter={(value) => {
+                          if (value === 'speed') return 'Скорость (км/ч)'
+                          if (value === 'ele') return 'Высота (м)'
+                          return value
+                        }}
+                      />
+                      <Line
+                        yAxisId="speed"
+                        type="monotone"
+                        dataKey="speed"
+                        stroke="#f59e0b"
+                        strokeWidth={2}
+                        dot={false}
+                        name="speed"
+                        connectNulls
+                      />
+                      <Line
+                        yAxisId="ele"
+                        type="monotone"
+                        dataKey="ele"
+                        stroke="#60a5fa"
+                        strokeWidth={2}
+                        dot={false}
+                        name="ele"
+                        connectNulls
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
         <div className="mt-12 text-center text-slate-500 text-sm">
-          <p>Анализатор тренировок • XML визуализация данных</p>
+          <p>Анализатор тренировок • XML + GPX визуализация данных</p>
         </div>
       </div>
     </div>
